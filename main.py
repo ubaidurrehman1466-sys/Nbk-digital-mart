@@ -8,7 +8,6 @@ import logging
 from flask import Flask
 from threading import Thread
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.request import HTTPXRequest
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -19,29 +18,29 @@ from telegram.ext import (
     ContextTypes,
 )
 
-# Render Keep-Alive Web Server
+# --- KEEP ALIVE WEB SERVER ---
 app = Flask('')
 
 @app.route('/')
 def home():
-    return "NBK Digital Mart Bot is Active!"
+    return "NBK Digital Mart Bot is 100% Running!"
 
-def run():
+def run_web():
     port = int(os.environ.get("PORT", 8080))
     app.run(host='0.0.0.0', port=port)
 
-Thread(target=run).start()
+Thread(target=run_web).start()
 
 logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
 
-# --- CONFIGURATION ---
-BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "8882711271:AAGpU6Qac3EFqQ1nioWamAT-eTdT5wPM6QE")
-ADMIN_ID = int(os.environ.get("ADMIN_ID", "8736699831"))
+# --- DIRECT HARDCODED CONFIG (To Avoid Environment Variable Errors) ---
+BOT_TOKEN = "8882711271:AAGpU6Qac3EFqQ1nioWamAT-eTdT5wPM6QE"
+ADMIN_ID = 8736699831
 SUPPORT_USERNAME = "nawabibnekhalid"
 
 BINANCE_API_KEY = os.environ.get("BINANCE_API_KEY", "")
 BINANCE_SECRET_KEY = os.environ.get("BINANCE_SECRET_KEY", "")
-USDT_WALLET = os.environ.get("USDT_WALLET_ADDRESS", "0xa1441c6f6b815a921bf814d241d7a507e32fd71b")
+USDT_WALLET = "0xa1441c6f6b815a921bf814d241d7a507e32fd71b"
 
 PRODUCTS_FILE = "products.json"
 USED_TXIDS_FILE = "used_txids.json"
@@ -105,18 +104,19 @@ def verify_binance_deposit(txid, expected_amount):
                         return True, "Verified!"
                     else:
                         return False, f"Amount kam hai. Required: ${expected_amount}"
-            return False, "TxID deposit history mein nahi mili. 1-2 min baad try karein."
-        return False, "Binance API Response Error."
+            return False, "TxID deposit history mein nahi mili."
+        return False, "Binance API Error."
     except Exception as e:
         return False, f"Connection Error: {str(e)}"
 
+# --- COMMAND HANDLERS ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     products = load_products()
     if not products:
         msg_text = "👋 Welcome to **NBK Digital Mart**!\n\nAbhi koi product available nahi hai."
         keyboard = [[InlineKeyboardButton("💬 Contact Support", url=f"https://t.me/{SUPPORT_USERNAME}")]]
     else:
-        msg_text = "👋 Welcome to **NBK Digital Mart**!\n\nProduct select karein:"
+        msg_text = "👋 Welcome to **NBK Digital Mart**!\n\nNiche di gayi list se product select karein:"
         keyboard = [[InlineKeyboardButton(f"{p['name']} - ${p['price']} USDT", callback_data=f"buy_{p_id}")] for p_id, p in products.items()]
         keyboard.append([InlineKeyboardButton("💬 Contact Support", url=f"https://t.me/{SUPPORT_USERNAME}")])
 
@@ -161,8 +161,9 @@ async def handle_txid(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_ID:
-        await update.message.reply_text("🚫 Access Denied.")
+    user_id = update.effective_user.id
+    if user_id != ADMIN_ID:
+        await update.message.reply_text(f"🚫 Access Denied. Your ID: {user_id}")
         return
 
     keyboard = [
@@ -232,17 +233,7 @@ async def cancel_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 def main():
-    # Network Timeouts configured for Render
-    req_general = HTTPXRequest(connect_timeout=30.0, read_timeout=30.0)
-    req_updates = HTTPXRequest(connect_timeout=30.0, read_timeout=30.0)
-
-    app_bot = (
-        Application.builder()
-        .token(BOT_TOKEN)
-        .request(req_general)
-        .get_updates_request(req_updates)
-        .build()
-    )
+    app_bot = Application.builder().token(BOT_TOKEN).build()
 
     app_bot.add_handler(CommandHandler("start", start))
     app_bot.add_handler(CommandHandler("admin", admin_panel))
@@ -270,9 +261,8 @@ def main():
     app_bot.add_handler(add_conv)
     app_bot.add_handler(CallbackQueryHandler(admin_callback, pattern="^(admin_view|admin_delete|del_.*)$"))
 
-    print("Bot is starting...")
-    # bootstrap_retries=-1 means it will infinite retry on network drop
-    app_bot.run_polling(drop_pending_updates=True, bootstrap_retries=-1, poll_interval=1.0)
+    print("Bot is starting polling...")
+    app_bot.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
     main()
