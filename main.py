@@ -13,17 +13,16 @@ from telegram.ext import (
     CommandHandler,
     CallbackQueryHandler,
     MessageHandler,
-    ConversationHandler,
     filters,
     ContextTypes,
 )
 
-# --- KEEP ALIVE WEB SERVER ---
+# --- FLASK KEEP-ALIVE SERVER ---
 app = Flask('')
 
 @app.route('/')
 def home():
-    return "NBK Digital Mart Bot is 100% Running!"
+    return "NBK Digital Mart Ready-Made Bot is Active!"
 
 def run_web():
     port = int(os.environ.get("PORT", 8080))
@@ -33,7 +32,7 @@ Thread(target=run_web).start()
 
 logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
 
-# --- DIRECT HARDCODED CONFIG (To Avoid Environment Variable Errors) ---
+# --- CONFIGURATION ---
 BOT_TOKEN = "8882711271:AAGpU6Qac3EFqQ1nioWamAT-eTdT5wPM6QE"
 ADMIN_ID = 8736699831
 SUPPORT_USERNAME = "nawabibnekhalid"
@@ -45,9 +44,10 @@ USDT_WALLET = "0xa1441c6f6b815a921bf814d241d7a507e32fd71b"
 PRODUCTS_FILE = "products.json"
 USED_TXIDS_FILE = "used_txids.json"
 
-WAIT_TXID = 1
-ADD_NAME, ADD_PRICE, ADD_DESC = 2, 3, 4
+# In-memory simple user states (Prevents ConversationHandler freezing)
+USER_STATES = {}
 
+# --- HELPER FUNCTIONS ---
 def load_products():
     if os.path.exists(PRODUCTS_FILE):
         try:
@@ -76,12 +76,13 @@ def save_used_txid(txid):
     with open(USED_TXIDS_FILE, "w") as f:
         json.dump(txids, f, indent=4)
 
+# --- LIVE BINANCE AUTO-VERIFICATION ---
 def verify_binance_deposit(txid, expected_amount):
     if not BINANCE_API_KEY or not BINANCE_SECRET_KEY:
-        return False, "Binance API Key configured nahi hai."
+        return False, "Binance API Keys missing hain."
 
     if txid in load_used_txids():
-        return False, "Yeh TxID pehle use ho chuki hai!"
+        return False, "Yeh TxID pehle se verify ho chuki hai!"
 
     url = "https://api.binance.com/sapi/v1/capital/deposit/hisrec"
     timestamp = int(time.time() * 1000)
@@ -101,71 +102,37 @@ def verify_binance_deposit(txid, expected_amount):
                     actual_amount = float(deposit.get("amount", 0))
                     if actual_amount >= (float(expected_amount) * 0.95):
                         save_used_txid(txid)
-                        return True, "Verified!"
+                        return True, "Payment Verified!"
                     else:
-                        return False, f"Amount kam hai. Required: ${expected_amount}"
-            return False, "TxID deposit history mein nahi mili."
-        return False, "Binance API Error."
+                        return False, f"Amount Kam hai. Required: ${expected_amount}, Paid: ${actual_amount}"
+            return False, "TxID deposit history mein nahi mili. 1-2 mins baad try karein."
+        return False, "Binance API Response Error."
     except Exception as e:
         return False, f"Connection Error: {str(e)}"
 
-# --- COMMAND HANDLERS ---
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# --- COMMANDS ---
+async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    USER_STATES.pop(chat_id, None)
+    
     products = load_products()
     if not products:
-        msg_text = "👋 Welcome to **NBK Digital Mart**!\n\nAbhi koi product available nahi hai."
+        text = "👋 Welcome to **NBK Digital Mart**!\n\nAbhi store mein koi product nahi hai."
         keyboard = [[InlineKeyboardButton("💬 Contact Support", url=f"https://t.me/{SUPPORT_USERNAME}")]]
     else:
-        msg_text = "👋 Welcome to **NBK Digital Mart**!\n\nNiche di gayi list se product select karein:"
+        text = "👋 Welcome to **NBK Digital Mart**!\n\nNiche list se product select karein (100% Auto Binance Verification):"
         keyboard = [[InlineKeyboardButton(f"{p['name']} - ${p['price']} USDT", callback_data=f"buy_{p_id}")] for p_id, p in products.items()]
         keyboard.append([InlineKeyboardButton("💬 Contact Support", url=f"https://t.me/{SUPPORT_USERNAME}")])
 
-    await update.message.reply_text(msg_text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+    await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
 
-async def btn_buy(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    p_id = query.data.split("_")[1]
-    product = load_products().get(p_id)
-    
-    if product:
-        context.user_data['buy_product'] = product
-        msg = (
-            f"📦 **{product['name']}**\n"
-            f"💰 **Price:** ${product['price']} USDT\n\n"
-            f"💳 **USDT Address (BEP20 / BSC):**\n"
-            f"`{USDT_WALLET}`\n\n"
-            "⚠️ Payment karke **TxID (Transaction Hash)** yahan send karein!"
-        )
-        await query.message.reply_text(msg, parse_mode="Markdown")
-        return WAIT_TXID
-
-async def handle_txid(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_txid = update.message.text.strip()
-    product = context.user_data.get('buy_product')
-
-    if not product:
-        await update.message.reply_text("Pehle /start bhej kar product select karein.")
-        return ConversationHandler.END
-
-    await update.message.reply_text("⏳ **Verifying TxID with Binance...**")
-    is_valid, msg = verify_binance_deposit(user_txid, product['price'])
-
-    if is_valid:
-        delivery_text = f"🎉 **PAYMENT SUCCESSFUL!**\n\n📦 **{product['name']}**\n\n📝 Details:\n{product['desc']}"
-        await update.message.reply_text(delivery_text, parse_mode="Markdown")
-        await context.bot.send_message(chat_id=ADMIN_ID, text=f"✅ **NEW ORDER!**\nUser: @{update.effective_user.username}\nProduct: {product['name']}")
-    else:
-        await update.message.reply_text(f"❌ **Failed:** {msg}\nSupport: @{SUPPORT_USERNAME}")
-
-    return ConversationHandler.END
-
-async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def admin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if user_id != ADMIN_ID:
-        await update.message.reply_text(f"🚫 Access Denied. Your ID: {user_id}")
+        await update.message.reply_text("🚫 Access Denied.")
         return
 
+    USER_STATES.pop(user_id, None)
     keyboard = [
         [InlineKeyboardButton("➕ Add Product", callback_data="admin_add")],
         [InlineKeyboardButton("❌ Delete Product", callback_data="admin_delete")],
@@ -173,95 +140,124 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ]
     await update.message.reply_text("⚙️ **NBK Digital Mart Admin Panel**", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
 
-async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def cancel_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    USER_STATES.pop(update.effective_chat.id, None)
+    await update.message.reply_text("✅ Action Cancelled. Clear state.")
+
+# --- CALLBACK BUTTONS ---
+async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    if query.from_user.id != ADMIN_ID: return
+    chat_id = query.message.chat_id
+    user_id = query.from_user.id
+    data = query.data
     await query.answer()
 
-    if query.data == "admin_view":
+    if data.startswith("buy_"):
+        p_id = data.split("_")[1]
+        product = load_products().get(p_id)
+        if product:
+            USER_STATES[chat_id] = {"action": "WAIT_TXID", "product": product}
+            msg = (
+                f"📦 **{product['name']}**\n"
+                f"💰 **Price:** ${product['price']} USDT\n\n"
+                f"💳 **USDT Deposit Address (BEP20 / BSC):**\n"
+                f"`{USDT_WALLET}`\n\n"
+                "⚠️ Payment bhejney ke baad **TxID (Transaction Hash)** reply mein send karein!"
+            )
+            await query.message.reply_text(msg, parse_mode="Markdown")
+
+    elif data == "admin_add" and user_id == ADMIN_ID:
+        USER_STATES[chat_id] = {"action": "ADD_NAME"}
+        await query.message.reply_text("Product ka **Name** likhein:")
+
+    elif data == "admin_view" and user_id == ADMIN_ID:
         prods = load_products()
-        text = "📦 **Products:**\n\n" + "\n".join([f"• {p['name']} - ${p['price']}" for p in prods.values()]) if prods else "Store khali hai."
+        text = "📦 **Current Products:**\n\n" + "\n".join([f"• {p['name']} - ${p['price']} USDT" for p in prods.values()]) if prods else "Store khali hai."
         await query.message.reply_text(text)
 
-    elif query.data == "admin_delete":
+    elif data == "admin_delete" and user_id == ADMIN_ID:
         prods = load_products()
         if not prods:
-            await query.message.reply_text("Koi product nahi hai.")
+            await query.message.reply_text("Koi product delete karne ke liye nahi hai.")
             return
         keyboard = [[InlineKeyboardButton(f"❌ Delete {p['name']}", callback_data=f"del_{p_id}")] for p_id, p in prods.items()]
         await query.message.reply_text("Select product to delete:", reply_markup=InlineKeyboardMarkup(keyboard))
 
-    elif query.data.startswith("del_"):
-        p_id = query.data.split("_")[1]
+    elif data.startswith("del_") and user_id == ADMIN_ID:
+        p_id = data.split("_")[1]
         prods = load_products()
         if p_id in prods:
             name = prods[p_id]['name']
             del prods[p_id]
             save_products(prods)
-            await query.message.reply_text(f"✅ {name} deleted!")
+            await query.message.reply_text(f"✅ **{name}** delete ho gayi!")
 
-async def start_add(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    await query.message.reply_text("Product ka **Name** likhein:")
-    return ADD_NAME
+# --- TEXT MESSAGE HANDLER ---
+async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    text = update.message.text.strip()
+    state = USER_STATES.get(chat_id)
 
-async def add_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data['new_name'] = update.message.text
-    await update.message.reply_text("Price (USDT) likhein:")
-    return ADD_PRICE
+    if not state:
+        return
 
-async def add_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data['new_price'] = update.message.text
-    await update.message.reply_text("Delivery Details/Link likhein:")
-    return ADD_DESC
+    action = state.get("action")
 
-async def add_desc(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    prods = load_products()
-    new_id = str(len(prods) + 1)
-    prods[new_id] = {
-        "name": context.user_data['new_name'],
-        "price": context.user_data['new_price'],
-        "desc": update.message.text
-    }
-    save_products(prods)
-    await update.message.reply_text(f"🎉 **{context.user_data['new_name']}** added!")
-    return ConversationHandler.END
+    if action == "WAIT_TXID":
+        product = state.get("product")
+        await update.message.reply_text("⏳ **Binance Blockchain se Live TxID Verify ho rahi hai... Wait karein.**")
+        
+        is_valid, msg = verify_binance_deposit(text, product['price'])
+        if is_valid:
+            USER_STATES.pop(chat_id, None)
+            delivery_text = (
+                f"🎉 **PAYMENT AUTO-VERIFIED!**\n\n"
+                f"📦 **Product:** {product['name']}\n\n"
+                f"📝 **Your Details / Link:**\n"
+                f"{product['desc']}\n\n"
+                f"Thank you for shopping with NBK Digital Mart! ❤️"
+            )
+            await update.message.reply_text(delivery_text, parse_mode="Markdown")
+            await context.bot.send_message(
+                chat_id=ADMIN_ID,
+                text=f"⚡ **AUTO ORDER DELIVERED!**\nUser: @{update.effective_user.username}\nProduct: {product['name']}\nTxID: `{text}`",
+                parse_mode="Markdown"
+            )
+        else:
+            await update.message.reply_text(f"❌ **Verification Failed:** {msg}\nSupport: @{SUPPORT_USERNAME}")
 
-async def cancel_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Cancelled.")
-    return ConversationHandler.END
+    elif action == "ADD_NAME":
+        USER_STATES[chat_id] = {"action": "ADD_PRICE", "name": text}
+        await update.message.reply_text("Product ki **Price (USDT mein)** likhein (e.g. 1.5):")
+
+    elif action == "ADD_PRICE":
+        USER_STATES[chat_id]["price"] = text
+        USER_STATES[chat_id]["action"] = "ADD_DESC"
+        await update.message.reply_text("Product ka **Link / Account Details** likhein (Jo auto-delivery par milega):")
+
+    elif action == "ADD_DESC":
+        p_name = USER_STATES[chat_id]["name"]
+        p_price = USER_STATES[chat_id]["price"]
+        
+        prods = load_products()
+        new_id = str(len(prods) + 1)
+        prods[new_id] = {"name": p_name, "price": p_price, "desc": text}
+        save_products(prods)
+        
+        USER_STATES.pop(chat_id, None)
+        await update.message.reply_text(f"🎉 **{p_name}** successfully add ho gayi!", parse_mode="Markdown")
 
 def main():
     app_bot = Application.builder().token(BOT_TOKEN).build()
 
-    app_bot.add_handler(CommandHandler("start", start))
-    app_bot.add_handler(CommandHandler("admin", admin_panel))
+    app_bot.add_handler(CommandHandler("start", start_cmd))
+    app_bot.add_handler(CommandHandler("admin", admin_cmd))
     app_bot.add_handler(CommandHandler("cancel", cancel_cmd))
+    
+    app_bot.add_handler(CallbackQueryHandler(handle_callback))
+    app_bot.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
-    buy_conv = ConversationHandler(
-        entry_points=[CallbackQueryHandler(btn_buy, pattern="^buy_")],
-        states={WAIT_TXID: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_txid)]},
-        fallbacks=[CommandHandler("cancel", cancel_cmd)],
-        allow_reentry=True
-    )
-
-    add_conv = ConversationHandler(
-        entry_points=[CallbackQueryHandler(start_add, pattern="^admin_add$")],
-        states={
-            ADD_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_name)],
-            ADD_PRICE: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_price)],
-            ADD_DESC: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_desc)]
-        },
-        fallbacks=[CommandHandler("cancel", cancel_cmd)],
-        allow_reentry=True
-    )
-
-    app_bot.add_handler(buy_conv)
-    app_bot.add_handler(add_conv)
-    app_bot.add_handler(CallbackQueryHandler(admin_callback, pattern="^(admin_view|admin_delete|del_.*)$"))
-
-    print("Bot is starting polling...")
+    print("Bot starting with zero-freeze architecture...")
     app_bot.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
