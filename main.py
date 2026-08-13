@@ -8,6 +8,7 @@ import logging
 from flask import Flask
 from threading import Thread
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.request import HTTPXRequest
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -231,13 +232,15 @@ async def cancel_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 def main():
-    # Application WITH TIMEOUT SETTINGS
+    # Network Timeouts configured for Render
+    req_general = HTTPXRequest(connect_timeout=30.0, read_timeout=30.0)
+    req_updates = HTTPXRequest(connect_timeout=30.0, read_timeout=30.0)
+
     app_bot = (
         Application.builder()
         .token(BOT_TOKEN)
-        .read_timeout(30)
-        .write_timeout(30)
-        .connect_timeout(30)
+        .request(req_general)
+        .get_updates_request(req_updates)
         .build()
     )
 
@@ -267,8 +270,9 @@ def main():
     app_bot.add_handler(add_conv)
     app_bot.add_handler(CallbackQueryHandler(admin_callback, pattern="^(admin_view|admin_delete|del_.*)$"))
 
-    print("Bot is starting with optimized polling...")
-    app_bot.run_polling(drop_pending_updates=True)
+    print("Bot is starting...")
+    # bootstrap_retries=-1 means it will infinite retry on network drop
+    app_bot.run_polling(drop_pending_updates=True, bootstrap_retries=-1, poll_interval=1.0)
 
 if __name__ == "__main__":
     main()
