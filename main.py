@@ -1,264 +1,489 @@
-import os
-import json
-import time
-import hmac
-import hashlib
-import requests
+"""Main bot entry point for the Telegram Digital Products Store."""
+
 import logging
-from flask import Flask
-from threading import Thread
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import (
-    Application,
-    CommandHandler,
-    CallbackQueryHandler,
-    MessageHandler,
-    filters,
-    ContextTypes,
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ConversationHandler, PreCheckoutQueryHandler
+from config import settings, validate_settings
+from database import init_db
+from database.init_data import initialize_database
+from handlers import user_handlers, admin_handlers, payment_handlers, admin_conversations, dispute_handlers
+
+# M""M M"""""""`YM M""""""'YMM M"""""`'"""`YM M""""""'YMM MM""""""""`M M""MMMMM""M 
+# M  M M  mmmm.  M M  mmmm. `M M  mm.  mm.  M M  mmmm. `M MM  mmmmmmmM M  MMMMM  M 
+# M  M M  MMMMM  M M  MMMMM  M M  MMM  MMM  M M  MMMMM  M M`      MMMM M  MMMMP  M 
+# M  M M  MMMMM  M M  MMMMM  M M  MMM  MMM  M M  MMMMM  M MM  MMMMMMMM M  MMMM' .M 
+# M  M M  MMMMM  M M  MMMM' .M M  MMM  MMM  M M  MMMM' .M MM  MMMMMMMM M  MMP' .MM 
+# M  M M  MMMMM  M M       .MM M  MMM  MMM  M M       .MM MM        .M M     .dMMM 
+# MMMM MMMMMMMMMMM MMMMMMMMMMM MMMMMMMMMMMMMM MMMMMMMMMMM MMMMMMMMMMMM MMMMMMMMMMM 
+
+# Configure logging
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO
 )
+logger = logging.getLogger(__name__)
 
-# --- FLASK KEEP-ALIVE SERVER ---
-app = Flask('')
-
-@app.route('/')
-def home():
-    return "NBK Digital Mart Ready-Made Bot is Active!"
-
-def run_web():
-    port = int(os.environ.get("PORT", 8080))
-    app.run(host='0.0.0.0', port=port)
-
-Thread(target=run_web).start()
-
-logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
-
-# --- CONFIGURATION ---
-BOT_TOKEN = "8882711271:AAGpU6Qac3EFqQ1nioWamAT-eTdT5wPM6QE"
-ADMIN_ID = 8736699831
-SUPPORT_USERNAME = "nawabibnekhalid"
-
-BINANCE_API_KEY = os.environ.get("BINANCE_API_KEY", "")
-BINANCE_SECRET_KEY = os.environ.get("BINANCE_SECRET_KEY", "")
-USDT_WALLET = "0xa1441c6f6b815a921bf814d241d7a507e32fd71b"
-
-PRODUCTS_FILE = "products.json"
-USED_TXIDS_FILE = "used_txids.json"
-
-# In-memory simple user states (Prevents ConversationHandler freezing)
-USER_STATES = {}
-
-# --- HELPER FUNCTIONS ---
-def load_products():
-    if os.path.exists(PRODUCTS_FILE):
-        try:
-            with open(PRODUCTS_FILE, "r") as f:
-                return json.load(f)
-        except Exception:
-            pass
-    return {}
-
-def save_products(products):
-    with open(PRODUCTS_FILE, "w") as f:
-        json.dump(products, f, indent=4)
-
-def load_used_txids():
-    if os.path.exists(USED_TXIDS_FILE):
-        try:
-            with open(USED_TXIDS_FILE, "r") as f:
-                return json.load(f)
-        except Exception:
-            pass
-    return []
-
-def save_used_txid(txid):
-    txids = load_used_txids()
-    txids.append(txid)
-    with open(USED_TXIDS_FILE, "w") as f:
-        json.dump(txids, f, indent=4)
-
-# --- LIVE BINANCE AUTO-VERIFICATION ---
-def verify_binance_deposit(txid, expected_amount):
-    if not BINANCE_API_KEY or not BINANCE_SECRET_KEY:
-        return False, "Binance API Keys missing hain."
-
-    if txid in load_used_txids():
-        return False, "Yeh TxID pehle se verify ho chuki hai!"
-
-    url = "https://api.binance.com/sapi/v1/capital/deposit/hisrec"
-    timestamp = int(time.time() * 1000)
-    query_string = f"timestamp={timestamp}"
-    
-    try:
-        signature = hmac.new(BINANCE_SECRET_KEY.encode('utf-8'), query_string.encode('utf-8'), hashlib.sha256).hexdigest()
-        headers = {"X-MBX-APIKEY": BINANCE_API_KEY}
-        full_url = f"{url}?{query_string}&signature={signature}"
-
-        response = requests.get(full_url, headers=headers, timeout=10)
-        data = response.json()
-
-        if response.status_code == 200 and isinstance(data, list):
-            for deposit in data:
-                if deposit.get("txId") == txid and deposit.get("status") == 1:
-                    actual_amount = float(deposit.get("amount", 0))
-                    if actual_amount >= (float(expected_amount) * 0.95):
-                        save_used_txid(txid)
-                        return True, "Payment Verified!"
-                    else:
-                        return False, f"Amount Kam hai. Required: ${expected_amount}, Paid: ${actual_amount}"
-            return False, "TxID deposit history mein nahi mili. 1-2 mins baad try karein."
-        return False, "Binance API Response Error."
-    except Exception as e:
-        return False, f"Connection Error: {str(e)}"
-
-# --- COMMANDS ---
-async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-    USER_STATES.pop(chat_id, None)
-    
-    products = load_products()
-    if not products:
-        text = "👋 Welcome to **NBK Digital Mart**!\n\nAbhi store mein koi product nahi hai."
-        keyboard = [[InlineKeyboardButton("💬 Contact Support", url=f"https://t.me/{SUPPORT_USERNAME}")]]
-    else:
-        text = "👋 Welcome to **NBK Digital Mart**!\n\nNiche list se product select karein (100% Auto Binance Verification):"
-        keyboard = [[InlineKeyboardButton(f"{p['name']} - ${p['price']} USDT", callback_data=f"buy_{p_id}")] for p_id, p in products.items()]
-        keyboard.append([InlineKeyboardButton("💬 Contact Support", url=f"https://t.me/{SUPPORT_USERNAME}")])
-
-    await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
-
-async def admin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    if user_id != ADMIN_ID:
-        await update.message.reply_text("🚫 Access Denied.")
-        return
-
-    USER_STATES.pop(user_id, None)
-    keyboard = [
-        [InlineKeyboardButton("➕ Add Product", callback_data="admin_add")],
-        [InlineKeyboardButton("❌ Delete Product", callback_data="admin_delete")],
-        [InlineKeyboardButton("📦 View Products", callback_data="admin_view")]
-    ]
-    await update.message.reply_text("⚙️ **NBK Digital Mart Admin Panel**", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
-
-async def cancel_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    USER_STATES.pop(update.effective_chat.id, None)
-    await update.message.reply_text("✅ Action Cancelled. Clear state.")
-
-# --- CALLBACK BUTTONS ---
-async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    chat_id = query.message.chat_id
-    user_id = query.from_user.id
-    data = query.data
-    await query.answer()
-
-    if data.startswith("buy_"):
-        p_id = data.split("_")[1]
-        product = load_products().get(p_id)
-        if product:
-            USER_STATES[chat_id] = {"action": "WAIT_TXID", "product": product}
-            msg = (
-                f"📦 **{product['name']}**\n"
-                f"💰 **Price:** ${product['price']} USDT\n\n"
-                f"💳 **USDT Deposit Address (BEP20 / BSC):**\n"
-                f"`{USDT_WALLET}`\n\n"
-                "⚠️ Payment bhejney ke baad **TxID (Transaction Hash)** reply mein send karein!"
-            )
-            await query.message.reply_text(msg, parse_mode="Markdown")
-
-    elif data == "admin_add" and user_id == ADMIN_ID:
-        USER_STATES[chat_id] = {"action": "ADD_NAME"}
-        await query.message.reply_text("Product ka **Name** likhein:")
-
-    elif data == "admin_view" and user_id == ADMIN_ID:
-        prods = load_products()
-        text = "📦 **Current Products:**\n\n" + "\n".join([f"• {p['name']} - ${p['price']} USDT" for p in prods.values()]) if prods else "Store khali hai."
-        await query.message.reply_text(text)
-
-    elif data == "admin_delete" and user_id == ADMIN_ID:
-        prods = load_products()
-        if not prods:
-            await query.message.reply_text("Koi product delete karne ke liye nahi hai.")
-            return
-        keyboard = [[InlineKeyboardButton(f"❌ Delete {p['name']}", callback_data=f"del_{p_id}")] for p_id, p in prods.items()]
-        await query.message.reply_text("Select product to delete:", reply_markup=InlineKeyboardMarkup(keyboard))
-
-    elif data.startswith("del_") and user_id == ADMIN_ID:
-        p_id = data.split("_")[1]
-        prods = load_products()
-        if p_id in prods:
-            name = prods[p_id]['name']
-            del prods[p_id]
-            save_products(prods)
-            await query.message.reply_text(f"✅ **{name}** delete ho gayi!")
-
-# --- TEXT MESSAGE HANDLER ---
-async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-    text = update.message.text.strip()
-    state = USER_STATES.get(chat_id)
-
-    if not state:
-        return
-
-    action = state.get("action")
-
-    if action == "WAIT_TXID":
-        product = state.get("product")
-        await update.message.reply_text("⏳ **Binance Blockchain se Live TxID Verify ho rahi hai... Wait karein.**")
-        
-        is_valid, msg = verify_binance_deposit(text, product['price'])
-        if is_valid:
-            USER_STATES.pop(chat_id, None)
-            delivery_text = (
-                f"🎉 **PAYMENT AUTO-VERIFIED!**\n\n"
-                f"📦 **Product:** {product['name']}\n\n"
-                f"📝 **Your Details / Link:**\n"
-                f"{product['desc']}\n\n"
-                f"Thank you for shopping with NBK Digital Mart! ❤️"
-            )
-            await update.message.reply_text(delivery_text, parse_mode="Markdown")
-            await context.bot.send_message(
-                chat_id=ADMIN_ID,
-                text=f"⚡ **AUTO ORDER DELIVERED!**\nUser: @{update.effective_user.username}\nProduct: {product['name']}\nTxID: `{text}`",
-                parse_mode="Markdown"
-            )
-        else:
-            await update.message.reply_text(f"❌ **Verification Failed:** {msg}\nSupport: @{SUPPORT_USERNAME}")
-
-    elif action == "ADD_NAME":
-        USER_STATES[chat_id] = {"action": "ADD_PRICE", "name": text}
-        await update.message.reply_text("Product ki **Price (USDT mein)** likhein (e.g. 1.5):")
-
-    elif action == "ADD_PRICE":
-        USER_STATES[chat_id]["price"] = text
-        USER_STATES[chat_id]["action"] = "ADD_DESC"
-        await update.message.reply_text("Product ka **Link / Account Details** likhein (Jo auto-delivery par milega):")
-
-    elif action == "ADD_DESC":
-        p_name = USER_STATES[chat_id]["name"]
-        p_price = USER_STATES[chat_id]["price"]
-        
-        prods = load_products()
-        new_id = str(len(prods) + 1)
-        prods[new_id] = {"name": p_name, "price": p_price, "desc": text}
-        save_products(prods)
-        
-        USER_STATES.pop(chat_id, None)
-        await update.message.reply_text(f"🎉 **{p_name}** successfully add ho gayi!", parse_mode="Markdown")
 
 def main():
-    app_bot = Application.builder().token(BOT_TOKEN).build()
+    """Initialize and start the bot."""
+    # Validate configuration
+    try:
+        validate_settings()
+    except ValueError as e:
+        logger.error(f"Configuration error: {e}")
+        return
 
-    app_bot.add_handler(CommandHandler("start", start_cmd))
-    app_bot.add_handler(CommandHandler("admin", admin_cmd))
-    app_bot.add_handler(CommandHandler("cancel", cancel_cmd))
-    
-    app_bot.add_handler(CallbackQueryHandler(handle_callback))
-    app_bot.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
+    # Initialize database
+    try:
+        initialize_database()
+    except Exception as e:
+        logger.error(f"Database initialization error: {e}")
+        return
 
-    print("Bot starting with zero-freeze architecture...")
-    app_bot.run_polling(drop_pending_updates=True)
+    # Create application
+    application = Application.builder().token(settings.BOT_TOKEN).build()
+
+    # Register command handlers
+    application.add_handler(CommandHandler("start", user_handlers.start_command))
+    application.add_handler(CommandHandler("admin", admin_handlers.admin_command))
+
+    # Register conversation handlers for multi-step flows
+
+    # Top-up conversation
+    topup_conv_handler = ConversationHandler(
+        entry_points=[CallbackQueryHandler(payment_handlers.topup_start, pattern="^topup$")],
+        states={
+            payment_handlers.AMOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, payment_handlers.topup_amount)],
+            payment_handlers.METHOD: [
+                CallbackQueryHandler(payment_handlers.payment_method_crypto, pattern="^pay_crypto$"),
+                CallbackQueryHandler(payment_handlers.payment_method_card, pattern="^pay_card$"),
+            ],
+        },
+        fallbacks=[
+            CallbackQueryHandler(payment_handlers.cancel_topup, pattern="^cancel$"),
+            CallbackQueryHandler(payment_handlers.cancel_topup)
+        ],
+        per_user=True,
+        per_chat=True,
+        allow_reentry=True,
+    )
+    application.add_handler(topup_conv_handler)
+
+    # Telegram Payments (Card) handlers — confirmation arrives via the bot's update
+    # polling, not a separate job: approve the pre-checkout, then credit on success.
+    application.add_handler(PreCheckoutQueryHandler(payment_handlers.precheckout_callback))
+    application.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, payment_handlers.successful_payment_callback))
+
+    # Product creation conversation
+    create_product_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(admin_conversations.create_product_start, pattern="^admin_create_product$")],
+        states={
+            admin_conversations.PRODUCT_NAME: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, admin_conversations.product_name),
+                CallbackQueryHandler(admin_conversations.cancel_product_creation, pattern="^cancel_product$")
+            ],
+            admin_conversations.PRODUCT_DESC: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, admin_conversations.product_desc),
+                CallbackQueryHandler(admin_conversations.cancel_product_creation, pattern="^cancel_product$")
+            ],
+            admin_conversations.PRODUCT_PRICE: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, admin_conversations.product_price),
+                CallbackQueryHandler(admin_conversations.cancel_product_creation, pattern="^cancel_product$")
+            ],
+            admin_conversations.PRODUCT_TYPE: [
+                CallbackQueryHandler(admin_conversations.product_type, pattern="^type_"),
+                CallbackQueryHandler(admin_conversations.product_type, pattern="^cancel_product$")
+            ],
+            admin_conversations.PRODUCT_CATEGORY: [
+                CallbackQueryHandler(admin_conversations.product_category, pattern="^cat_"),
+                CallbackQueryHandler(admin_conversations.product_category, pattern="^cancel_product$")
+            ],
+            admin_conversations.PRODUCT_SUBCATEGORY: [
+                CallbackQueryHandler(admin_conversations.product_subcategory, pattern="^subcat_"),
+                CallbackQueryHandler(admin_conversations.product_subcategory, pattern="^cancel_product$")
+            ],
+            admin_conversations.PRODUCT_IMAGE: [
+                MessageHandler(filters.PHOTO | filters.TEXT, admin_conversations.product_image),
+                CallbackQueryHandler(admin_conversations.cancel_product_creation, pattern="^cancel_product$")
+            ],
+            admin_conversations.PRODUCT_DOWNLOAD_LINK: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, admin_conversations.product_download_link),
+                CallbackQueryHandler(admin_conversations.cancel_product_creation, pattern="^cancel_product$")
+            ],
+            admin_conversations.PRODUCT_KEYS: [
+                MessageHandler(filters.Document.ALL, admin_conversations.product_keys),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, admin_conversations.product_keys),
+                CallbackQueryHandler(admin_conversations.cancel_product_creation, pattern="^cancel_product$")
+            ],
+        },
+        fallbacks=[
+            MessageHandler(filters.COMMAND, admin_conversations.cancel_product_creation),
+            CallbackQueryHandler(admin_conversations.cancel_product_creation)
+        ],
+        per_user=True,
+        per_chat=True,
+        allow_reentry=True,
+    )
+    application.add_handler(create_product_conv)
+
+    # Product edit conversation
+    edit_product_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(admin_conversations.edit_product_start, pattern="^admin_edit_product$")],
+        states={
+            admin_conversations.EDIT_SELECT_PRODUCT: [
+                CallbackQueryHandler(admin_conversations.edit_select_product, pattern="^edit_prod_"),
+                CallbackQueryHandler(admin_conversations.edit_select_product, pattern="^admin_edit_product_page_"),
+                CallbackQueryHandler(admin_conversations.cancel_conversation, pattern="^admin_products$")
+            ],
+            admin_conversations.EDIT_SELECT_FIELD: [
+                CallbackQueryHandler(admin_conversations.edit_select_field, pattern="^edit_"),
+                CallbackQueryHandler(admin_conversations.edit_select_field, pattern="^cancel_edit$")
+            ],
+            admin_conversations.EDIT_NEW_VALUE: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, admin_conversations.edit_new_value),
+                CallbackQueryHandler(admin_conversations.edit_new_value, pattern="^newprodcat_"),
+                CallbackQueryHandler(admin_conversations.edit_new_value, pattern="^newprodsubcat_"),
+                CallbackQueryHandler(admin_conversations.cancel_conversation, pattern="^cancel_edit$")
+            ],
+            admin_conversations.EDIT_IMAGE_VALUE: [
+                MessageHandler(filters.PHOTO, admin_conversations.edit_image_value),
+                CallbackQueryHandler(admin_conversations.edit_image_value, pattern="^remove_product_image$"),
+                CallbackQueryHandler(admin_conversations.edit_image_value, pattern="^cancel_edit$")
+            ],
+        },
+        fallbacks=[
+            MessageHandler(filters.COMMAND, admin_conversations.cancel_conversation),
+            CallbackQueryHandler(admin_conversations.cancel_conversation)
+        ],
+        per_user=True,
+        per_chat=True,
+        allow_reentry=True,
+    )
+    application.add_handler(edit_product_conv)
+
+    # Category creation conversation
+    create_category_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(admin_conversations.create_category_start, pattern="^admin_create_category$")],
+        states={
+            admin_conversations.CATEGORY_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_conversations.category_name)],
+            admin_conversations.CATEGORY_DESC: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_conversations.category_desc)],
+        },
+        fallbacks=[
+            MessageHandler(filters.COMMAND, admin_conversations.cancel_conversation),
+            CallbackQueryHandler(admin_conversations.cancel_conversation)
+        ],
+        per_user=True,
+        per_chat=True,
+        allow_reentry=True,
+    )
+    application.add_handler(create_category_conv)
+
+    # Subcategory creation conversation
+    create_subcategory_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(admin_conversations.create_subcategory_start, pattern="^admin_create_subcategory$")],
+        states={
+            admin_conversations.SUBCATEGORY_CATEGORY: [
+                CallbackQueryHandler(admin_conversations.subcategory_category, pattern="^subcat_cat_"),
+                CallbackQueryHandler(admin_conversations.subcategory_category, pattern="^cancel_subcat$")
+            ],
+            admin_conversations.SUBCATEGORY_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_conversations.subcategory_name)],
+        },
+        fallbacks=[
+            MessageHandler(filters.COMMAND, admin_conversations.cancel_conversation),
+            CallbackQueryHandler(admin_conversations.cancel_conversation)
+        ],
+        per_user=True,
+        per_chat=True,
+        allow_reentry=True,
+    )
+    application.add_handler(create_subcategory_conv)
+
+    # Category edit conversation
+    edit_category_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(admin_conversations.edit_category_start, pattern="^admin_edit_category$")],
+        states={
+            admin_conversations.EDIT_CATEGORY_SELECT: [
+                CallbackQueryHandler(admin_conversations.edit_category_select, pattern="^edit_cat_"),
+                CallbackQueryHandler(admin_conversations.edit_category_select, pattern="^admin_edit_category_page_"),
+                CallbackQueryHandler(admin_conversations.cancel_conversation, pattern="^admin_manage_categories$")
+            ],
+            admin_conversations.EDIT_CATEGORY_FIELD: [
+                CallbackQueryHandler(admin_conversations.edit_category_field, pattern="^editcat_"),
+                CallbackQueryHandler(admin_conversations.edit_category_field, pattern="^cancel_edit_cat$")
+            ],
+            admin_conversations.EDIT_CATEGORY_VALUE: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, admin_conversations.edit_category_value),
+                CallbackQueryHandler(admin_conversations.cancel_conversation, pattern="^cancel_edit_cat$")
+            ],
+        },
+        fallbacks=[
+            MessageHandler(filters.COMMAND, admin_conversations.cancel_conversation),
+            CallbackQueryHandler(admin_conversations.cancel_conversation)
+        ],
+        per_user=True,
+        per_chat=True,
+        allow_reentry=True,
+    )
+    application.add_handler(edit_category_conv)
+
+    # Subcategory edit conversation
+    edit_subcategory_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(admin_conversations.edit_subcategory_start, pattern="^admin_edit_subcategory$")],
+        states={
+            admin_conversations.EDIT_SUBCATEGORY_SELECT: [
+                CallbackQueryHandler(admin_conversations.edit_subcategory_select, pattern="^edit_subcat_"),
+                CallbackQueryHandler(admin_conversations.edit_subcategory_select, pattern="^admin_edit_subcategory_page_"),
+                CallbackQueryHandler(admin_conversations.cancel_conversation, pattern="^admin_manage_categories$")
+            ],
+            admin_conversations.EDIT_SUBCATEGORY_FIELD: [
+                CallbackQueryHandler(admin_conversations.edit_subcategory_field, pattern="^editsubcat_"),
+                CallbackQueryHandler(admin_conversations.edit_subcategory_field, pattern="^cancel_edit_subcat$")
+            ],
+            admin_conversations.EDIT_SUBCATEGORY_VALUE: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, admin_conversations.edit_subcategory_value),
+                CallbackQueryHandler(admin_conversations.edit_subcategory_value, pattern="^newcat_"),
+                CallbackQueryHandler(admin_conversations.cancel_conversation, pattern="^cancel_edit_subcat$")
+            ],
+        },
+        fallbacks=[
+            MessageHandler(filters.COMMAND, admin_conversations.cancel_conversation),
+            CallbackQueryHandler(admin_conversations.cancel_conversation)
+        ],
+        per_user=True,
+        per_chat=True,
+        allow_reentry=True,
+    )
+    application.add_handler(edit_subcategory_conv)
+
+    # Support username configuration conversation
+    config_support_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(admin_conversations.config_support_username, pattern="^admin_support_username$")],
+        states={
+            admin_conversations.SETTING_VALUE: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_conversations.setting_value)],
+        },
+        fallbacks=[
+            MessageHandler(filters.COMMAND, admin_conversations.cancel_conversation),
+            CallbackQueryHandler(admin_conversations.cancel_conversation)
+        ],
+        per_user=True,
+        per_chat=True,
+        allow_reentry=True,
+    )
+    application.add_handler(config_support_conv)
+
+    # Channel username configuration conversation
+    config_channel_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(admin_conversations.config_channel_username, pattern="^admin_channel_username$")],
+        states={
+            admin_conversations.SETTING_VALUE: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_conversations.setting_value)],
+        },
+        fallbacks=[
+            MessageHandler(filters.COMMAND, admin_conversations.cancel_conversation),
+            CallbackQueryHandler(admin_conversations.cancel_conversation)
+        ],
+        per_user=True,
+        per_chat=True,
+        allow_reentry=True,
+    )
+    application.add_handler(config_channel_conv)
+
+    # Welcome message configuration conversation
+    config_welcome_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(admin_conversations.config_welcome_message, pattern="^admin_welcome_msg$")],
+        states={
+            admin_conversations.WELCOME_MESSAGE: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_conversations.welcome_message_value)],
+        },
+        fallbacks=[
+            MessageHandler(filters.COMMAND, admin_conversations.cancel_settings),
+            CallbackQueryHandler(admin_conversations.cancel_settings, pattern="^cancel$")
+        ],
+        per_user=True,
+        per_chat=True,
+        allow_reentry=True,
+    )
+    application.add_handler(config_welcome_conv)
+
+    # Store logo configuration conversation
+    config_logo_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(admin_conversations.config_store_logo, pattern="^admin_store_logo$")],
+        states={
+            admin_conversations.STORE_LOGO: [MessageHandler(filters.PHOTO, admin_conversations.store_logo_value)],
+        },
+        fallbacks=[
+            MessageHandler(filters.COMMAND, admin_conversations.cancel_settings),
+            CallbackQueryHandler(admin_conversations.cancel_settings, pattern="^cancel$")
+        ],
+        per_user=True,
+        per_chat=True,
+        allow_reentry=True,
+    )
+    application.add_handler(config_logo_conv)
+
+    # Text-only broadcast conversation
+    broadcast_text_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(admin_conversations.broadcast_text_start, pattern="^admin_broadcast_text$")],
+        states={
+            admin_conversations.BROADCAST_TEXT: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, admin_conversations.broadcast_text_message)
+            ],
+        },
+        fallbacks=[
+            CallbackQueryHandler(admin_conversations.cancel_broadcast, pattern="^cancel$"),
+            MessageHandler(filters.COMMAND, admin_conversations.cancel_broadcast)
+        ],
+        per_user=True,
+        per_chat=True,
+        allow_reentry=True,
+    )
+    application.add_handler(broadcast_text_conv)
+
+    # Image + Text broadcast conversation
+    broadcast_image_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(admin_conversations.broadcast_image_start, pattern="^admin_broadcast_image$")],
+        states={
+            admin_conversations.BROADCAST_IMAGE: [
+                MessageHandler(filters.PHOTO, admin_conversations.broadcast_image_photo)
+            ],
+            admin_conversations.BROADCAST_TEXT: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, admin_conversations.broadcast_image_text)
+            ],
+        },
+        fallbacks=[
+            CallbackQueryHandler(admin_conversations.cancel_broadcast, pattern="^cancel$"),
+            MessageHandler(filters.COMMAND, admin_conversations.cancel_broadcast)
+        ],
+        per_user=True,
+        per_chat=True,
+        allow_reentry=True,
+    )
+    application.add_handler(broadcast_image_conv)
+
+    # Dispute conversation
+    dispute_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(dispute_handlers.open_dispute_start, pattern="^open_dispute_")],
+        states={
+            dispute_handlers.DISPUTE_REASON: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, dispute_handlers.dispute_reason_received)
+            ],
+        },
+        fallbacks=[
+            CallbackQueryHandler(dispute_handlers.dispute_cancel, pattern="^cancel$"),
+            MessageHandler(filters.COMMAND, dispute_handlers.dispute_cancel)
+        ],
+        per_user=True,
+        per_chat=True,
+        allow_reentry=True,
+    )
+    application.add_handler(dispute_conv)
+
+    # Direct purchase conversation (Buy Now flow)
+    purchase_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(payment_handlers.buy_product_start, pattern="^buy_")],
+        states={
+            payment_handlers.PURCHASE_QUANTITY: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, payment_handlers.purchase_quantity_input),
+                CallbackQueryHandler(payment_handlers.cancel_purchase, pattern="^cancel_purchase$")
+            ],
+        },
+        fallbacks=[
+            CallbackQueryHandler(payment_handlers.cancel_purchase, pattern="^cancel_purchase$"),
+            MessageHandler(filters.COMMAND, payment_handlers.cancel_purchase)
+        ],
+        per_user=True,
+        per_chat=True,
+        allow_reentry=True,
+    )
+    application.add_handler(purchase_conv)
+
+    # Register callback query handlers
+    application.add_handler(CallbackQueryHandler(user_handlers.main_menu_callback, pattern="^main_menu$"))
+    application.add_handler(CallbackQueryHandler(user_handlers.main_menu_callback, pattern="^back$"))  # Back button goes to main menu
+    application.add_handler(CallbackQueryHandler(user_handlers.back_to_products_callback, pattern="^back_to_products$"))
+    application.add_handler(CallbackQueryHandler(user_handlers.products_callback, pattern="^products"))
+    application.add_handler(CallbackQueryHandler(user_handlers.category_callback, pattern="^category_"))
+    application.add_handler(CallbackQueryHandler(user_handlers.subcategory_callback, pattern="^subcategory_"))
+    application.add_handler(CallbackQueryHandler(user_handlers.product_callback, pattern="^product_"))
+    application.add_handler(CallbackQueryHandler(user_handlers.availability_callback, pattern="^availability$"))
+    application.add_handler(CallbackQueryHandler(user_handlers.support_callback, pattern="^support$"))
+    application.add_handler(CallbackQueryHandler(user_handlers.order_history_callback, pattern="^order_history"))
+    application.add_handler(CallbackQueryHandler(user_handlers.user_order_detail_callback, pattern="^user_order_detail_"))
+
+    # Purchase confirmation and cancellation handlers
+    application.add_handler(CallbackQueryHandler(payment_handlers.confirm_purchase, pattern="^confirm_purchase_"))
+    application.add_handler(CallbackQueryHandler(payment_handlers.cancel_purchase, pattern="^cancel_purchase$"))
+
+    # Global cancel handler for payment pages (outside conversation)
+    application.add_handler(CallbackQueryHandler(payment_handlers.cancel_payment_page, pattern="^cancel$"))
+
+    # Admin callback handlers
+    application.add_handler(CallbackQueryHandler(admin_handlers.admin_menu_callback, pattern="^admin_menu$"))
+    application.add_handler(CallbackQueryHandler(admin_handlers.admin_products_callback, pattern="^admin_products"))
+    application.add_handler(CallbackQueryHandler(admin_handlers.admin_restock_keys_callback, pattern="^admin_restock_keys$"))
+    application.add_handler(CallbackQueryHandler(admin_handlers.admin_manage_categories_callback, pattern="^admin_manage_categories$"))
+    application.add_handler(CallbackQueryHandler(admin_handlers.admin_view_categories_callback, pattern="^admin_view_categories$"))
+    application.add_handler(CallbackQueryHandler(admin_handlers.admin_view_users_callback, pattern="^admin_view_users"))
+    application.add_handler(CallbackQueryHandler(admin_handlers.admin_user_detail_callback, pattern="^view_user_"))
+    application.add_handler(CallbackQueryHandler(admin_handlers.admin_ban_user_callback, pattern="^ban_user_"))
+    application.add_handler(CallbackQueryHandler(admin_handlers.admin_unban_user_callback, pattern="^unban_user_"))
+    application.add_handler(CallbackQueryHandler(admin_handlers.admin_view_orders_callback, pattern="^admin_view_orders"))
+    application.add_handler(CallbackQueryHandler(admin_handlers.admin_confirm_order_menu, pattern="^admin_confirm_order$"))
+    application.add_handler(CallbackQueryHandler(admin_handlers.admin_cancel_order_menu, pattern="^admin_cancel_order$"))
+    application.add_handler(CallbackQueryHandler(admin_handlers.admin_confirm_payment_callback, pattern="^confirm_payment_"))
+    application.add_handler(CallbackQueryHandler(admin_handlers.admin_cancel_payment_callback, pattern="^cancel_payment_"))
+    application.add_handler(CallbackQueryHandler(admin_handlers.admin_order_detail_callback, pattern="^view_order_"))
+    application.add_handler(CallbackQueryHandler(admin_handlers.admin_complete_order_callback, pattern="^complete_order_"))
+    application.add_handler(CallbackQueryHandler(admin_handlers.admin_cancel_order_callback, pattern="^cancel_order_"))
+    application.add_handler(CallbackQueryHandler(dispute_handlers.admin_view_disputes_callback, pattern="^admin_view_disputes"))
+    application.add_handler(CallbackQueryHandler(dispute_handlers.admin_dispute_detail_callback, pattern="^admin_dispute_detail_"))
+    application.add_handler(CallbackQueryHandler(dispute_handlers.admin_resolve_dispute_callback, pattern="^resolve_dispute_"))
+    application.add_handler(CallbackQueryHandler(admin_handlers.admin_users_callback, pattern="^admin_users"))
+    application.add_handler(CallbackQueryHandler(admin_handlers.admin_orders_callback, pattern="^admin_orders"))
+    application.add_handler(CallbackQueryHandler(admin_handlers.admin_settings_callback, pattern="^admin_settings"))
+    application.add_handler(CallbackQueryHandler(admin_handlers.admin_broadcast_callback, pattern="^admin_broadcast"))
+
+    # Restock keys conversation handler
+    restock_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(admin_handlers.admin_select_product_restock_callback, pattern="^select_product_")],
+        states={
+            admin_handlers.WAITING_FOR_KEYS: [
+                MessageHandler(filters.Document.ALL & filters.User(settings.ADMIN_TELEGRAM_ID), admin_handlers.handle_restock_keys_file),
+                MessageHandler(filters.TEXT & ~filters.COMMAND & filters.User(settings.ADMIN_TELEGRAM_ID), admin_handlers.handle_restock_keys_paste),
+            ],
+        },
+        fallbacks=[
+            CallbackQueryHandler(admin_handlers.cancel_restock, pattern="^cancel_restock$"),
+            CommandHandler("cancel", admin_handlers.cancel_restock, filters=filters.User(settings.ADMIN_TELEGRAM_ID)),
+        ],
+    )
+    application.add_handler(restock_conv)
+
+    # Schedule background jobs
+    job_queue = application.job_queue
+
+    # Payment checking jobs
+    job_queue.run_repeating(
+        payment_handlers.check_pending_payments,
+        interval=settings.PAYMENT_CHECK_INTERVAL,
+        first=10
+    )
+    job_queue.run_repeating(
+        payment_handlers.check_expired_payments,
+        interval=60,
+        first=30
+    )
+
+    # Availability broadcast job - runs every 12 hours (43200 seconds)
+    logger.info("Scheduling availability broadcast job (first run in 10 seconds, then every 12 hours)")
+    job_queue.run_repeating(
+        payment_handlers.broadcast_availability_to_all_users,
+        interval=43200,  # 12 hours in seconds
+        first=10  # Start 10 seconds after bot starts (for testing)
+    )
+
+    # Start the bot
+    logger.info("Bot started successfully!")
+    logger.info("Availability broadcast will run in 10 seconds...")
+    application.run_polling(allowed_updates=["message", "callback_query", "pre_checkout_query"])
+
 
 if __name__ == "__main__":
     main()
