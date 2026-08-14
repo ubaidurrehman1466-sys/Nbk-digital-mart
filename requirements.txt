@@ -1,4 +1,4 @@
-telebot==0.0.5
+python-telegram-bot==20.7
 urllib3==2.2.3
 watchdog==6.0.0
 python-dotenv==1.0.1
