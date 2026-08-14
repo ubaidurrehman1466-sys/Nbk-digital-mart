@@ -3,9 +3,9 @@
 import logging
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ConversationHandler, PreCheckoutQueryHandler
 from settings import settings, validate_settings
-from database import init_db
-from database.init_data import initialize_database
-from handlers import user_handlers, admin_handlers, payment_handlers, admin_conversations, dispute_handlers
+from db import init_db
+from init_data import initialize_default_data
+import user_handlers, admin_handlers
 
 # M""M M"""""""`YM M""""""'YMM M"""""`'"""`YM M""""""'YMM MM""""""""`M M""MMMMM""M 
 # M  M M  mmmm.  M M  mmmm. `M M  mm.  mm.  M M  mmmm. `M MM  mmmmmmmM M  MMMMM  M 
